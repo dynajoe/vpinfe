@@ -5,6 +5,7 @@ import os
 import platform
 import subprocess
 import sys
+import threading
 import time
 
 from common import table_play_service
@@ -152,13 +153,33 @@ def launch_table(
             table_play_service.increment_start_count(table)
 
         startup_detected = False
-        for line in process.stdout:
-            if not startup_detected and "Startup done" in line:
-                startup_detected = True
-                api.send_event_all_windows_incself({"type": "TableRunning"})
-                logger.info("table running")
 
+        def _watch_startup() -> None:
+            nonlocal startup_detected
+            try:
+                for line in process.stdout:
+                    if not startup_detected and "Startup done" in line:
+                        startup_detected = True
+                        api.send_event_all_windows_incself({"type": "TableRunning"})
+                        logger.info("table running")
+            except (OSError, ValueError):
+                pass  # pipe closed underneath us; nothing left to watch
+
+        reader = threading.Thread(
+            target=_watch_startup, name="vpx-stdout-reader", daemon=True
+        )
+        reader.start()
+
+        # Wait on the table process, not on stdout reaching EOF. Helper processes
+        # the table spawns inherit the pipe and can outlive it -- on Windows the
+        # B2S backglass server (an out-of-process COM server) routinely does -- so
+        # EOF may never arrive and the frontend would hang after the player quits.
         process.wait()
+        # Give the reader a moment to flush, but do not close stdout here: the
+        # reader may still be blocked in read() and closing would wait on its
+        # buffer lock, reintroducing the very hang this avoids. The daemon thread
+        # exits by itself once the last pipe holder is gone.
+        reader.join(timeout=1)
     finally:
         start_dof_service_if_enabled(api._iniConfig)
 
