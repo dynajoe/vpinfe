@@ -176,6 +176,15 @@ http_server = runtime.start_asset_server(MOUNT_POINTS, iniconfig)
 # Start the NiceGUI HTTP server
 manager_ui_port = int(iniconfig.config['Network'].get('manageruiport', '8001'))
 start_manager_ui(port=manager_ui_port)
+# Deadlock (AB-BA): ui.run() in the manager thread runs uvicorn's
+# logging.dictConfig -> _clearExistingHandlers -> logging.shutdown(), which
+# takes the logging module lock then each handler lock; concurrently
+# reconfigure_app_logging() closes handlers, taking a handler lock then the
+# module lock. If they interleave, both threads park forever before any
+# window launches (black screens; py-spy confirmed both stacks). Wait until
+# the manager UI answers HTTP — its logging config is done by then — before
+# touching handlers. Bounded at 15s, so a broken manager UI can't hang boot.
+runtime.wait_for_manager_ui_ready(manager_ui_port)
 reconfigure_app_logging()
 
 # Start the WebSocket bridge
